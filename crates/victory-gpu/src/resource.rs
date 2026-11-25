@@ -1323,7 +1323,13 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             && r.desc.dimension == TEXTURE_2D
             && r.desc.depth_or_array_size == 1
             && r.desc.mip_levels > 1
-            && r.desc.sample_count <= 1;
+            && r.desc.sample_count <= 1
+            // A low texture (`VICTORY_TEXTURE_LOW`, [`mips_left_out`]) is
+            // made whole at its reduced size: the tiles count levels of the
+            // host texture while views, uploads and copies shift title
+            // levels by the left-out mips, and both at once would shift a
+            // view twice.
+            && mips_left_out(&r.desc) == 0;
         if shape_fits && r.host.placed.load(Relaxed) && crate::tiles::wanted() {
             let bytes = footprint(&r.desc).map_or(0, |f| f.size);
             let start = r.data() as u64;
@@ -2036,6 +2042,59 @@ pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
     hosted(this, true).map(|made| made.0)
 }
 
+/// Mip levels the host copy of a title texture leaves out: low textures,
+/// `VICTORY_TEXTURE_LOW=<1 or 2>`. Grand Theft Auto VI's gameplay scenes
+/// name ~16 GB of textures and the RX 6700 XT lets ~10 GB be used, so
+/// ~16,000 of them never got a host copy and showed empty or garbage (run
+/// fork22). Leaving out the largest mip quarters a texture's bytes; its
+/// shaders sample by normalized coordinates and see the next mip.
+/// Only 2D textures the title fills (no target, depth or unordered access,
+/// one sample), whose reduced size stays at least 256 texels each way and
+/// a whole number of blocks for block-compressed formats.
+pub(crate) fn mips_left_out(desc: &ResourceDesc) -> u32 {
+    const TEXTURE_2D: u32 = 3;
+    static LOW: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let low = *LOW.get_or_init(|| {
+        std::env::var("VICTORY_TEXTURE_LOW").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0).min(2)
+    });
+    if low == 0 || desc.dimension != TEXTURE_2D || desc.flags & 7 != 0 || desc.sample_count > 1 {
+        return 0;
+    }
+    let mips = mip_count(desc);
+    let block = element(pc_format(desc.format)).is_some_and(|(_, b)| b == 4);
+    let mut skip = 0;
+    while skip < low && mips > skip + 1 {
+        let (w, h) = (desc.width >> (skip + 1), u64::from(desc.height) >> (skip + 1));
+        if w < 256 || h < 256 || (block && (w % 4 != 0 || h % 4 != 0)) {
+            break;
+        }
+        skip += 1;
+    }
+    skip
+}
+
+/// Host textures made with mips left out ([`mips_left_out`]).
+pub(crate) static LOW_TEXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The host subresource of a title texture's subresource `index`, with
+/// [`mips_left_out`] taken into account; `None` for a mip the host copy
+/// left out (a copy to or from it is not made).
+pub(crate) fn host_subresource(this: This, index: u32) -> Option<u32> {
+    let Some((_, desc)) = texture_memory(this) else { return Some(index) };
+    let skip = mips_left_out(&desc);
+    if skip == 0 {
+        return Some(index);
+    }
+    let mips = mip_count(&desc);
+    let (mip, slice) = (index % mips, index / mips);
+    (mip >= skip).then(|| (mip - skip) + slice * (mips - skip))
+}
+
+/// [`mips_left_out`] of a title resource (0 for buffers).
+pub(crate) fn mips_left_out_of(this: This) -> u32 {
+    texture_memory(this).map_or(0, |(_, d)| mips_left_out(&d))
+}
+
 /// A host texture like the title's: same description, in GPU memory,
 /// without the console's layout and flags.
 #[cfg(windows)]
@@ -2066,6 +2125,13 @@ fn host_texture_as(
     d.layout = 0;
     d.alignment = 0;
     d.flags &= PC_FLAGS;
+    let skip = mips_left_out(desc);
+    if skip > 0 {
+        d.width >>= skip;
+        d.height >>= skip;
+        d.mip_levels = (mip_count(desc) - skip) as u16;
+        LOW_TEXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     // PC refuses depth targets that are also unordered-access (the console
     // allows both; the title's shadow maps ask for it).
     // The host copy loses the unordered access: shaders write a colour
@@ -2146,6 +2212,9 @@ fn host_texture_as(
         tracing::warn!(error = %e, desc = ?d, reserved, "no host texture");
     }
     if let Some(t) = &texture {
+        // SAFETY: a live texture; its description is the host's.
+        let bytes = unsafe { host.device.GetResourceAllocationInfo(0, &[t.GetDesc()]) }.SizeInBytes;
+        crate::alive::track(t, crate::alive::TEXTURE, bytes);
         crate::host::name(t, || {
             format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
         });

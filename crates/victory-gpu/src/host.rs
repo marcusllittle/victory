@@ -602,6 +602,7 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
+        crate::drvhook::install();
         // `VICTORY_D3D12_BACKGROUND=0`: the runtime's background work (the
         // driver compiling shaders again on the "D3D Background Thread"s,
         // for minutes after pipelines were made or loaded) is switched off.
@@ -6238,7 +6239,12 @@ impl Host {
             )
         };
         match made {
-            Ok(()) => buffer,
+            Ok(()) => {
+                if let Some(b) = &buffer {
+                    crate::alive::track(b, crate::alive::READ_BACK, size);
+                }
+                buffer
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no read-back buffer");
                 None
@@ -6285,7 +6291,11 @@ impl Host {
                 })
         };
         match made {
-            Ok(()) => Some((buffer?, data.cast())),
+            Ok(()) => {
+                let b = buffer?;
+                crate::alive::track(&b, crate::alive::UPLOAD, size);
+                Some((b, data.cast()))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no upload buffer");
                 None
@@ -6575,9 +6585,18 @@ impl Meter {
             buffer.truncate(n.max(0) as usize);
             self.caption = Some(buffer);
         }
-        let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
-        let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
+        if self.caption.is_none() {
+            return;
+        }
+        // The game's name rather than the runtime's, as the user asked.
+        let bar = texture_loading_bar();
+        crate::discord::update(if bar.is_empty() {
+            format!("In game - {fps:.0} fps")
+        } else {
+            bar.trim().to_string()
+        });
+        let text = format!("GTA VI | {bar}{fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let mut text: Vec<u16> = text.encode_utf16().collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
         // which may not pump for a while), so a thread of ours does it and
@@ -6594,6 +6613,7 @@ impl Meter {
                         match next {
                             // SAFETY: a window handle and a NUL-terminated text.
                             Some((hwnd, text)) => unsafe {
+                                set_game_icon(HWND(hwnd as *mut _));
                                 let _ = SetWindowTextW(HWND(hwnd as *mut _), PCWSTR(text.as_ptr()));
                             },
                             None => std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -6602,6 +6622,48 @@ impl Meter {
                 });
         });
     }
+}
+
+/// "Loading textures 63% [######----]  " in the window's title
+/// while a backlog of textures picked by index is being uploaded (after a
+/// save loads: 14,000-24,000 at once, minutes at gameplay's frame rate);
+/// empty otherwise. About 2,800 stay waiting for good in gameplay (memory
+/// the title has not streamed in yet, runs fork24 and fork28), so the bar
+/// counts down to that floor.
+fn set_game_icon(hwnd: HWND) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    // The game's own logo from its package folder (beside the executable
+    // `victory run` was given), read at run time; nothing is copied.
+    let Some(exe) = std::env::args().skip(1).find(|a| a.to_ascii_lowercase().ends_with(".exe")) else { return };
+    let Some(dir) = std::path::Path::new(&exe).parent().map(std::path::Path::to_path_buf) else { return };
+    for (name, size, which) in [("xbs_logo_150.png", 64, ICON_BIG), ("xbs_logo_44.png", 32, ICON_SMALL)] {
+        let Ok(bytes) = std::fs::read(dir.join(name)) else { continue };
+        // SAFETY: PNG image bytes (accepted as icon data since Vista); the
+        // handle goes to the window, which keeps it for the run.
+        unsafe {
+            if let Ok(icon) = CreateIconFromResourceEx(&bytes, true, 0x0003_0000, size, size, LR_DEFAULTCOLOR) {
+                let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+            }
+        }
+    }
+}
+
+fn texture_loading_bar() -> String {
+    use std::sync::atomic::AtomicU64;
+    const FLOOR: u64 = 3_000;
+    static PEAK: AtomicU64 = AtomicU64::new(0);
+    let waiting = crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed);
+    if waiting <= FLOOR + 500 {
+        PEAK.store(0, Ordering::Relaxed);
+        return String::new();
+    }
+    let peak = PEAK.fetch_max(waiting, Ordering::Relaxed).max(waiting);
+    let done = (peak - waiting) * 100 / (peak - FLOOR).max(1);
+    let filled = (done / 10) as usize;
+    format!("Loading textures {done}% [{}{}]  ", "#".repeat(filled), "-".repeat(10 - filled))
 }
 
 impl Host {
@@ -6954,7 +7016,11 @@ impl Host {
                 })
         };
         match made {
-            Ok(()) => Some((buffer?, data.cast())),
+            Ok(()) => {
+                let b = buffer?;
+                crate::alive::track(&b, crate::alive::SHARED, size);
+                Some((b, data.cast()))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no shared buffer");
                 None
@@ -6998,7 +7064,12 @@ impl Host {
             )
         };
         match made {
-            Ok(()) => buffer,
+            Ok(()) => {
+                if let Some(b) = &buffer {
+                    crate::alive::track(b, crate::alive::CARD, size);
+                }
+                buffer
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no unordered-access buffer");
                 None

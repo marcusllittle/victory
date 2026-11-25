@@ -853,6 +853,13 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             if unlike(dst, src) {
                 return;
             }
+            if crate::resource::mips_left_out_of(dst) != crate::resource::mips_left_out_of(src) {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    tracing::warn!(?dst, ?src, "whole copy between textures whose low host copies left out different mips: skipped")
+                });
+                return;
+            }
             // A source the title fills itself is uploaded first (upstream
             // PR #671): a copy read whatever the host texture held.
             if crate::texture::title_written(from) {
@@ -991,6 +998,10 @@ extern "system" fn copy_texture_region(
             if crate::texture::title_written(texture) {
                 crate::texture::upload(list, src.resource, texture);
             }
+            let Some(index) = crate::resource::host_subresource(src.resource, src.footprint.offset as u32) else {
+                return; // a mip the low host copy left out
+            };
+            from.footprint.offset = u64::from(index);
             ensure_state(list, src.resource, COPY_SOURCE);
             from.resource = texture.as_raw().cast_const().cast();
         }
@@ -1006,6 +1017,12 @@ extern "system" fn copy_texture_region(
         crate::texture::host_written(dst.resource);
         let mut to_location = dst;
         to_location.resource = to.as_raw().cast_const().cast();
+        if dst.kind != FOOTPRINT {
+            let Some(index) = crate::resource::host_subresource(dst.resource, dst.footprint.offset as u32) else {
+                return; // a mip the low host copy left out
+            };
+            to_location.footprint.offset = u64::from(index);
+        }
         let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
         #[cfg(feature = "diagnostics")]
         {
@@ -1090,6 +1107,10 @@ fn read_back(
     ensure_state(list, src.resource, COPY_SOURCE);
     let mut from = src;
     from.resource = texture.as_raw().cast_const().cast();
+    from.footprint.offset = u64::from(
+        crate::resource::host_subresource(src.resource, src.footprint.offset as u32)
+            .ok_or("a mip the low host copy left out")?,
+    );
     let mut to = dst;
     to.resource = buffer.as_raw().cast_const().cast();
     to.footprint = footprint;

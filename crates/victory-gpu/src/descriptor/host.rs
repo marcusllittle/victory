@@ -2062,6 +2062,43 @@ fn srv_desc(words: &[u32; 10]) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
     }
 }
 
+/// A texture view's mip range on a host copy that left out the `skip`
+/// largest mips (`resource::mips_left_out`): title mip `m` is host mip
+/// `m - skip`; a view of a left-out mip starts at the host's largest.
+fn low_mips(d: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, skip: u32) {
+    let shift = |most: &mut u32, levels: &mut u32, clamp: &mut f32| {
+        let start = (*most).max(skip);
+        if *levels != u32::MAX {
+            let end = (*most + *levels).max(start + 1);
+            *levels = end - start;
+        }
+        *most = start - skip;
+        *clamp = (*clamp - skip as f32).max(0.0);
+    };
+    // SAFETY: the union member of the view's dimension.
+    unsafe {
+        match d.ViewDimension {
+            D3D12_SRV_DIMENSION_TEXTURE2D => {
+                let t = &mut d.Anonymous.Texture2D;
+                shift(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+                let t = &mut d.Anonymous.Texture2DArray;
+                shift(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+            }
+            D3D12_SRV_DIMENSION_TEXTURECUBE => {
+                let t = &mut d.Anonymous.TextureCube;
+                shift(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+            }
+            D3D12_SRV_DIMENSION_TEXTURECUBEARRAY => {
+                let t = &mut d.Anonymous.TextureCubeArray;
+                shift(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn uav_desc(words: &[u32; 10]) -> D3D12_UNORDERED_ACCESS_VIEW_DESC {
     let mut words = *words;
     words[0] = crate::resource::pc_format(words[0]);
@@ -2763,6 +2800,12 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                         },
                     };
                     crate::tiles::show_from(desc.get_or_insert(whole), first, u32::from(own.MipLevels));
+                }
+                let skip = crate::resource::mips_left_out_of(resource);
+                if skip > 0
+                    && let Some(d) = desc.as_mut()
+                {
+                    low_mips(d, skip);
                 }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {

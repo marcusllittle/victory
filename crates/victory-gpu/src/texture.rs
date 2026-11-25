@@ -41,10 +41,16 @@ pub(crate) struct Staging {
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     layout: victory_formats::texture::Layout,
-    /// Mips per array slice.
+    /// Mips per array slice (of the host texture).
     mips: u32,
+    /// Title mips the host texture leaves out (`resource::mips_left_out`):
+    /// host mip `m` is title mip `m + skip`.
+    skip: u32,
     /// The staging buffer's bytes (counted in `STAGED` while it lives).
     bytes: u64,
+    /// The buffer's own size: its size class ([`pool_class`]), which the
+    /// pool files it under when the texture lets it go.
+    capacity: u64,
     memory: *const u8,
     last: Mutex<Last>,
     /// Whether the staging buffer was detiled since a submitted list last
@@ -401,7 +407,60 @@ impl Drop for Staging {
         use std::sync::atomic::Ordering::Relaxed;
         STAGED[0].fetch_sub(1, Relaxed);
         STAGED[1].fetch_sub(self.bytes, Relaxed);
+        // Back to the pool once the submissions running now have finished
+        // (a list that copied from it holds the staging until its reset,
+        // so none recorded later reads it).
+        crate::host::retire(Returning(Some((self.capacity, self.buffer.clone(), self.data as usize))));
     }
+}
+
+/// Staging buffers no texture holds, by size class, kept to be used again.
+/// Each upload of a texture picked by index made a buffer and its texture's
+/// sweep destroyed it: 48,077 buffers, 24.6 GB, in 4 minutes of the
+/// prologue, and the driver gave none of that memory back to the system
+/// (the process's private memory grew by as much, to 49 GB, while the
+/// buffers alive stayed at 0.2 GB). Reused, the buffers are made once.
+static POOL: Mutex<Vec<(u64, ID3D12Resource, usize)>> = Mutex::new(Vec::new());
+/// The pool's bytes, and the most it keeps (past it a buffer is freed).
+static POOLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const POOL_MOST: u64 = 1 << 30;
+
+/// A buffer on its way back to the pool once the card is done with it.
+struct Returning(Option<(u64, ID3D12Resource, usize)>);
+
+impl Drop for Returning {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some((capacity, buffer, data)) = self.0.take() else {
+            return;
+        };
+        if POOLED.load(Relaxed) + capacity > POOL_MOST {
+            return;
+        }
+        POOLED.fetch_add(capacity, Relaxed);
+        POOL.lock().unwrap_or_else(|e| e.into_inner()).push((capacity, buffer, data));
+    }
+}
+
+/// The size a staging buffer for `bytes` is made with: the next power of
+/// two (at least 64 KiB), so that buffers fit the textures of other sizes
+/// and are found again.
+fn pool_class(bytes: u64) -> u64 {
+    bytes.max(64 << 10).next_power_of_two()
+}
+
+/// A pooled buffer of `capacity` bytes, or a new one.
+fn pooled_buffer(host: &crate::host::Host, capacity: u64) -> Option<(ID3D12Resource, *mut u8)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    {
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = pool.iter().position(|&(c, ..)| c == capacity) {
+            let (_, buffer, data) = pool.swap_remove(i);
+            POOLED.fetch_sub(capacity, Relaxed);
+            return Some((buffer, data as *mut u8));
+        }
+    }
+    host.upload_buffer(capacity)
 }
 
 /// For the memory line: staging buffers alive, their bytes, and how many
@@ -979,8 +1038,11 @@ impl Staging {
             // copy, which stands unmapped pages (zeros), and upload what
             // is there; nothing at all mapped changes nothing.
             // shortcut: read again at most every 30 frames (reading around
-            // unmapped pages is slow, and nothing tells us when pages
-            // arrive): a mip that streams in shows up to 30 frames late.
+            // unmapped pages is slow; the runtime's mapping notices make a
+            // slot due sooner): a mip that streams in may show late, its
+            // smaller mip standing in meanwhile (`fill_missing_mips`).
+            // Every second instead cost 16 s a frame of refreshes (run
+            // fork25: thousands of textures stay partly mapped).
             let frame = crate::frame::current();
             if last.partial.is_some_and(|at| frame < at + 30) {
                 return 0;
@@ -999,6 +1061,7 @@ impl Staging {
                     return false;
                 }
                 self.detile(read);
+                self.fill_missing_mips();
                 true
             });
             #[cfg(feature = "diagnostics")]
@@ -1068,6 +1131,69 @@ impl Staging {
         }
     }
 
+    /// A texture still streaming in has its small mips first; the larger
+    /// ones' pages are not mapped yet and read as zeros, which showed as
+    /// black or garbage patches until they arrived (the small texture bugs
+    /// of run fork24). Each such mip, all zero in the staging buffer, is
+    /// filled from the next smaller one, element by element (a block of a
+    /// block-compressed format standing for its 2x2 blocks): the texture
+    /// shows its lower detail meanwhile, as the console's streaming does.
+    /// 2D (and array) textures only.
+    fn fill_missing_mips(&self) {
+        let slices = self.footprints.len() as u32 / self.mips.max(1);
+        for slice in 0..slices {
+            for mip in (0..self.mips.saturating_sub(1)).rev() {
+                let at = (slice * self.mips + mip) as usize;
+                let (big, small) = (self.footprints[at], self.footprints[at + 1]);
+                let (big_rows, small_rows) = (self.rows[at] as usize, self.rows[at + 1] as usize);
+                if big.Footprint.Depth != 1 {
+                    return;
+                }
+                let Some((bytes, block)) = crate::resource::element(big.Footprint.Format.0 as u32) else {
+                    return;
+                };
+                let (bytes, block) = (bytes as usize, block as usize);
+                let big_pitch = big.Footprint.RowPitch as usize;
+                let small_pitch = small.Footprint.RowPitch as usize;
+                let big_row = (big.Footprint.Width as usize).div_ceil(block) * bytes;
+                let small_row = (small.Footprint.Width as usize).div_ceil(block) * bytes;
+                // SAFETY: both subresources' parts of the mapped staging
+                // buffer, which this texture's refresh alone writes.
+                let (dst, src) = unsafe {
+                    (
+                        std::slice::from_raw_parts_mut(self.data.add(big.Offset as usize), big_pitch * big_rows),
+                        std::slice::from_raw_parts(self.data.add(small.Offset as usize), small_pitch * small_rows),
+                    )
+                };
+                let empty = (0..big_rows).all(|y| dst[y * big_pitch..][..big_row].iter().all(|&b| b == 0));
+                if !empty {
+                    continue;
+                }
+                // Each smaller row widened once (every element twice), then
+                // copied whole into the two rows it stands for.
+                let began = std::time::Instant::now();
+                let mut wide = vec![0u8; big_row];
+                for sy in 0..small_rows.min(big_rows.div_ceil(2)) {
+                    let row = &src[sy * small_pitch..][..small_row];
+                    for (x, e) in wide.chunks_exact_mut(bytes).enumerate() {
+                        let sx = (x / 2).min(small_row / bytes - 1);
+                        e.copy_from_slice(&row[sx * bytes..][..bytes]);
+                    }
+                    for y in [2 * sy, 2 * sy + 1] {
+                        if y < big_rows {
+                            dst[y * big_pitch..][..big_row].copy_from_slice(&wide);
+                        }
+                    }
+                }
+                let n = FILLED_MIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let us = FILL_US.fetch_add(began.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                if n % 500 == 0 {
+                    tracing::info!(filled = n, ms = us / 1000, "streaming mips filled from the next smaller mip");
+                }
+            }
+        }
+    }
+
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
     fn detile(&self, tiled: &[u8]) {
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1109,7 +1235,7 @@ impl Staging {
             }
             if let Err(e) =
                 self.layout
-                    .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
+                    .detile(tiled, mip + self.skip, slice, linear, pitch, pitch * rows as usize)
             {
                 tracing::warn!(?e, mip, slice, "texture not detiled");
                 return;
@@ -1117,6 +1243,12 @@ impl Staging {
         }
     }
 }
+
+/// Mips of streaming textures filled from their next smaller mip
+/// ([`Staging::fill_missing_mips`]).
+pub(crate) static FILLED_MIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Time spent filling them, in microseconds.
+pub(crate) static FILL_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Lets go of a title texture's staging buffer (lists that recorded an
 /// upload from it hold it until they have run); the next upload makes one
@@ -1395,7 +1527,8 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
             Some(&mut total),
         );
     }
-    let (buffer, data) = host.upload_buffer(total)?;
+    let capacity = pool_class(total);
+    let (buffer, data) = pooled_buffer(host, capacity)?;
     crate::host::name(&buffer, || {
         format!(
             "staging of {resource:?} {}x{}x{} f{}",
@@ -1414,7 +1547,9 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         rows,
         layout,
         mips: u32::from(d.MipLevels),
+        skip: crate::resource::mips_left_out(&desc),
         bytes: total,
+        capacity,
         memory,
         last: Mutex::default(),
         dirty: std::sync::atomic::AtomicBool::new(true),

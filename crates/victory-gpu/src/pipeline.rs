@@ -457,6 +457,43 @@ fn skipped_shader(p: &Pipeline) -> Option<&str> {
         .map(|shader| shader.hash.as_str())
 }
 
+/// Whether draws are skipped now (the picture is not drawn; compute work,
+/// copies and read-backs still run, since the title waits on their
+/// results to go on: with them skipped too the opening cutscene stood
+/// still at its first title card). `VICTORY_SKIP_FLAG=<file>`: the file
+/// existing turns draws off, removing it turns them on; F10 in the game
+/// window turns them over. Looked at ten times a second at most.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn draws_skipped_now() -> bool {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    static ON: AtomicBool = AtomicBool::new(false);
+    static FILE: AtomicBool = AtomicBool::new(false);
+    let Some(path) = PATH.get_or_init(|| std::env::var_os("VICTORY_SKIP_FLAG").map(Into::into)) else {
+        return false;
+    };
+    let now = START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1000;
+    let last = LAST.load(Relaxed);
+    if now.saturating_sub(last) >= 100 && LAST.compare_exchange(last, now, Relaxed, Relaxed).is_ok() {
+        let mut on = ON.load(Relaxed);
+        let file = path.exists();
+        if file != FILE.swap(file, Relaxed) {
+            on = file;
+        }
+        // SAFETY: a plain key state query; bit 0 says pressed since the last query.
+        let f10 = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x79) };
+        if f10 & 1 != 0 {
+            on = !on;
+        }
+        if on != ON.swap(on, Relaxed) {
+            tracing::info!(on, "draws skipped (flag file or F10)");
+        }
+    }
+    ON.load(Relaxed)
+}
+
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn is_skipped(this: This) -> bool {
     !this.is_null() && skipped_shader(pipeline(this)).is_some()

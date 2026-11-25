@@ -20,6 +20,12 @@ mod capture;
 pub mod console;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
+#[cfg(windows)]
+mod alive;
+#[cfg(windows)]
+mod discord;
+#[cfg(windows)]
+mod drvhook;
 pub mod descriptor;
 pub mod device;
 #[cfg(windows)]

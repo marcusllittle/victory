@@ -509,6 +509,27 @@ pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> Stri
 
 /// The pipeline named `name`: loaded from the library by `load` if it is
 /// there with the same description, else made by `create` and stored.
+/// The first shader hash of `label` that `VICTORY_NO_COMPILE` (16-digit
+/// hashes, comma separated) lists: such a pipeline is not handed to the
+/// driver's compiler. On the RX 6700 XT the compile of compute
+/// 39f0e9aeb156a61c (first bound around frame 1,538 of the opening
+/// cutscene) never ended and held ~6 GB more every minute, the memory
+/// growth that ended every run (driver allocation trace, runs fork18-21).
+/// shortcut: the translation that makes that compile run away is not
+/// found yet; this keeps the run alive while it is looked for.
+fn never_compiled(label: &str) -> Option<String> {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| {
+        std::env::var("VICTORY_NO_COMPILE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| h.len() == 16)
+            .collect()
+    });
+    list.iter().find(|h| label.contains(h.as_str())).cloned()
+}
+
 pub(crate) fn pipeline(
     name: &str,
     load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
@@ -541,10 +562,22 @@ pub(crate) fn pipeline(
         Err(e) => e,
     };
     // Compiled outside any lock: compiles take up to seconds.
+    let label = LABEL.with(|l| l.borrow().clone());
+    if let Some(hash) = never_compiled(&label) {
+        tracing::warn!(
+            %label,
+            hash,
+            "host pipeline not compiled: its shader is listed in VICTORY_NO_COMPILE (the AMD driver's compiler              never finished it and grew by gigabytes a minute meanwhile); its draws or dispatches are dropped"
+        );
+        return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+    }
+    tracing::info!(%label, name, "host pipeline compile started");
     let pso = {
         let _call = call("make", name);
-        create()?
+        create()
     };
+    tracing::info!(%label, name, ms = began.elapsed().as_millis() as u64, ok = pso.is_ok(), "host pipeline compile ended");
+    let pso = pso?;
     MADE.fetch_add(1, Ordering::Relaxed);
     crate::host::trail(|| {
         let label = LABEL.with(|l| l.borrow().clone());
