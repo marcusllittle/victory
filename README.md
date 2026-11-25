@@ -44,6 +44,20 @@ and translates the console's GPU data and shaders (D3D12.X / GFX10 → D3D12 / D
 The frame time is mostly the emulation itself (GPU work at 2560x1440 internally, copying memory back to the title, and the
 submitting thread waiting on a lock), not a single expensive setting.
 
+## What was tried to raise the frame rate (2026-11-25, RX 6700 XT)
+
+| Attempt | Result |
+|---------|--------|
+| `VICTORY_DISPLAY_MODE=1920x1080` | No gain: the title keeps a 3840x2160 swap chain and renders at 2560x1440 inside |
+| hyphennn's newer switches (`VICTORY_ASYNC_SUBMIT`, `VICTORY_ASYNC_PRESENT`, `VICTORY_QUEUE2=3`, fxceless `0b0074e`, not in this branch) | Copy-back 90 -> 50 ms a frame, but still ~3.3 fps: the GPU itself (160-195 ms a frame) is the limit on this card |
+| `--console series-s` | Stays on a black screen at boot |
+| The title's settings file (`storage/settings/settings.xml`: `resolutionFullscreen`, `fsrQuality`) | Ignored by the console build: same 2560x1440 targets, same GPU time |
+| GPU timestamps | The title writes 4 a frame at one address, at the real frame pace; no dynamic resolution reacts to them |
+
+The internal render size comes from a pair of globals the title fills (width at `0x1499fecf8`, height at
+`0x1499fecfc` of `game_scarlett_master.exe` 1.0.2.1, preferred base); the render-target setup function at `0x141edb000`
+reads them. Lowering the render size at run time from there is the open lead.
+
 ## Build
 
 ```powershell
