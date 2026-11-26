@@ -12,7 +12,6 @@
 //! `VICTORY_D3D12_DRED=faults` and no data at all: nothing is noted.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 /// The kind of a direct mesh dispatch.
 pub(crate) const DIRECT: u32 = u32::MAX;
@@ -38,8 +37,10 @@ pub(crate) struct Indirects {
     meshes: Vec<Ran>,
 }
 
-/// A list's, shared with the report's table of lists.
-pub(crate) type Shared = Arc<Mutex<Indirects>>;
+/// A list's, shared with the report's table of lists (diagnostics: the
+/// module's tests build without them).
+#[cfg(feature = "diagnostics")]
+pub(crate) type Shared = std::sync::Arc<std::sync::Mutex<Indirects>>;
 
 impl Indirects {
     /// An indirect execution of `kind` (the argument's type) of at most
