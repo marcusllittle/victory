@@ -44,3 +44,27 @@ Leave `VICTORY_NO_COMPILE` unset. That hash is for an AMD driver that never fini
 6. **Memory.** The preset keeps less spare card memory and gives empty blocks back instead of holding them for five minutes. The title itself still wants a large commit on the Series X profile; this preset selects Series S. If other programs need the RAM, close them before launching. Unset `VICTORY_KEEP_FREED` or set it to anything but `0` to restore the longer retention.
 
 `VICTORY_VIEW_LIMIT` is optional. Leave it unset so the card's own view-heap size is used. Set it to `999999` only if a larger heap is accepted and then hangs on an index past a million views.
+
+## Measuring a run
+
+A release build shows no panel and the launcher logs warnings only, so ask for the numbers in a file. Every one of these is off unless set, and none changes what is drawn.
+
+```powershell
+$env:VICTORY_GAME_DIR  = 'D:\pixel\victory\game'
+$env:VICTORY_CACHE_DIR = 'D:\pixel\victory\cache'
+$env:VICTORY_STATS     = 'D:\pixel\victory\stats\run.csv'   # the folder must exist
+$env:VICTORY_D3D12_DRED = 'faults'                           # a device removal names the faulting address
+.\Play-VIctory.cmd rtx3060 2> D:\pixel\victory\stats\run.log
+scripts\stats-summary.ps1 D:\pixel\victory\stats\run.csv -MinDraws 1000
+```
+
+`VICTORY_STATS` writes one row a second: frame rate, the mean and the longest frame of that second, draws, draws dropped for want of a pipeline, indirect records run empty, the submitting thread's time and its waits for the card, private bytes, working set, commit left, the card's memory used and budget and the PC memory it spilled into, and the texture queue. It never writes over a file (`run.csv` becomes `run-1.csv`) and puts the run's `VICTORY_*` switches beside it in `run.csv.switches.txt`. `scripts\play.ps1 -Stats <file>` sets it too. `-MinDraws 1000` keeps the seconds in the world, `-From <seconds>` leaves out the start.
+
+Compare runs on the same save and the same part of it. Differences under about 5 % are noise.
+
+## The four faults, and what to look at first
+
+1. **Device removal.** The run ends with "host GPU device removed" in `run.log`. With `VICTORY_D3D12_DRED=faults` (release builds take it now; it costs next to nothing, and objects are named while it is on) a fault on the card shows `page fault at 0x...` with the allocations around it and the title memory copy or heap below it. `DXGI_ERROR_DEVICE_HUNG` with no page fault is a timeout. The message then names `TdrDelay`: at the default 2 s, set the DWORD `TdrDelay` to 10 under `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers` and restart. "slow host submission" warnings over 1000 ms before it point the same way. Keep `run.log`, `run.csv` and `crashes.log` from the title's data folder.
+2. **Foliage flicker.** Note the seconds it flickers and read the two columns for them. `dropped_no_pipeline` above 0 means draws were left out while their pipelines were made: run `victory warm --used` after that run and try again. `indirect_empty` above 0 means indirect records ran out of their list's budget. `VICTORY_INDIRECT_REST` is already off. Try `VICTORY_INDIRECT_BATCH=1` and then `VICTORY_INDIRECT_WINDOW=0`, one at a time. If both columns stay at 0 while it flickers, the cause is elsewhere: say so with the scene.
+3. **Dark rooms without rays.** The stand-in's estimate follows what is on screen, so a room lit only by bounced light stays near black. `VICTORY_AMBIENT_FLOOR=0.1` (off unless set; 0.05 to 0.2) gives the estimate a least level, on the scale of `constant:<level>`, shaded in creases. It does not let more of the title's own leftover through. Raise it until the room reads, then check that night outdoors is not milky.
+4. **Late textures.** `textures_waiting` that stays high, or `texture_queue_full_total` that keeps growing, means textures wait for room on the card, not for the disk. On 12 GB the queue keeps 3 GiB free for render targets (`VICTORY_CARD_ROOM_FOR_TARGETS_MB`, measured on the Series X profile at 1440p) and stops at 90 % of the budget (`VICTORY_TEXTURE_ROOM_PERCENT`). Series S makes smaller targets. Try `VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536`, then `VICTORY_TEXTURE_ROOM_PERCENT=94`, and watch `shared_used_mb`: if it climbs past a few hundred MB the card is over budget and frames slow down. Queue full never, and textures still late, points at staging: `VICTORY_TEXTURE_STAGE_MB=256`.

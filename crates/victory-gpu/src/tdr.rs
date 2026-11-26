@@ -53,6 +53,48 @@ impl Tdr {
     }
 }
 
+/// `DXGI_ERROR_DEVICE_HUNG`: what a removed device reports after Windows
+/// reset the card, for a timeout and (on NVIDIA) often for a fault on the
+/// card as well.
+pub(crate) const DEVICE_HUNG: u32 = 0x887A_0006;
+
+/// TdrDelay below this many seconds gets the hint.
+const ROOMY_DELAY: u32 = 8;
+
+impl Tdr {
+    /// For a device removed with `code`: when the card was reset and the
+    /// timeout is the default or short, how to tell a timeout from a fault and
+    /// how to give slow frames room. `faults`: device-removed data with the
+    /// faulting address is on (`VICTORY_D3D12_DRED=faults`).
+    pub(crate) fn hung_hint(&self, code: u32, faults: bool) -> Option<String> {
+        if code != DEVICE_HUNG {
+            return None;
+        }
+        let delay = self.delay.unwrap_or(2);
+        if delay >= ROOMY_DELAY {
+            return None;
+        }
+        let tell = if faults {
+            "no page fault in the device-removed data means a timeout"
+        } else {
+            "VICTORY_D3D12_DRED=faults tells a fault on the card (its address) from a timeout"
+        };
+        let set = self
+            .delay
+            .map_or_else(|| "unset: 2 s".to_owned(), |d| format!("{d} s"));
+        Some(format!(
+            "; Windows reset the card (GPU timeout TdrDelay {set}): {tell}; for a timeout, TdrDelay 10 (a DWORD under HKLM\\{KEY}, applied after a restart) gives a slow frame room"
+        ))
+    }
+}
+
+/// [`Tdr::hung_hint`] with the registry's values.
+pub(crate) fn hung_hint(code: u32, faults: bool) -> Option<String> {
+    (code == DEVICE_HUNG)
+        .then(Tdr::read)
+        .and_then(|t| t.hung_hint(code, faults))
+}
+
 /// A DWORD value under [`KEY`]; `None` when it is missing or not a DWORD.
 fn dword(name: &str) -> Option<u32> {
     let key = wide(KEY);
@@ -130,6 +172,45 @@ mod tests {
             ddi_delay: Some(60),
         };
         assert_eq!(tdr.warning(), None);
+    }
+
+    #[test]
+    fn a_hung_card_with_a_short_timeout_gets_the_hint() {
+        let default = Tdr::default();
+        let hint = default.hung_hint(DEVICE_HUNG, false).unwrap();
+        assert!(
+            hint.contains("TdrDelay unset: 2 s") && hint.contains("VICTORY_D3D12_DRED=faults"),
+            "{hint}"
+        );
+        assert!(
+            default
+                .hung_hint(DEVICE_HUNG, true)
+                .unwrap()
+                .contains("no page fault")
+        );
+        let short = Tdr {
+            delay: Some(5),
+            ..Tdr::default()
+        };
+        assert!(
+            short
+                .hung_hint(DEVICE_HUNG, false)
+                .unwrap()
+                .contains("TdrDelay 5 s")
+        );
+    }
+
+    #[test]
+    fn other_removals_and_a_roomy_timeout_get_none() {
+        // DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DRIVER_INTERNAL_ERROR.
+        for code in [0x887A_0005, 0x887A_0020] {
+            assert_eq!(Tdr::default().hung_hint(code, false), None);
+        }
+        let roomy = Tdr {
+            delay: Some(10),
+            ..Tdr::default()
+        };
+        assert_eq!(roomy.hung_hint(DEVICE_HUNG, false), None);
     }
 
     #[test]

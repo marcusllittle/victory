@@ -6,6 +6,8 @@
 # -Output1080   with -Rtx3060: 1920x1080 output and render scale 1. Not the default.
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
+# -Stats        a CSV of frame time, card and private memory once a second (VICTORY_STATS);
+#               scripts\stats-summary.ps1 reads it. Put it outside this folder.
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
     [Parameter(Mandatory)][string]$Exe,
@@ -14,7 +16,8 @@ param(
     [switch]$Rtx3060,
     [switch]$Output1080,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
-    [hashtable]$More = @{}
+    [hashtable]$More = @{},
+    [string]$Stats = ''
 )
 $settings = @{
     VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
@@ -48,6 +51,7 @@ if ($Rtx3060) {
         $settings.VICTORY_RENDER_SCALE = '1'
     }
 }
+if ($Stats) { $settings.VICTORY_STATS = $Stats }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"

@@ -801,6 +801,9 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
         // SAFETY: a plain query.
         if let Err(e) = unsafe { host.device.GetDeviceRemovedReason() } {
             text.push_str(&format!("; device removed: {e}"));
+            if let Some(hint) = crate::tdr::hung_hint(e.code().0 as u32, dred_faults()) {
+                text.push_str(&hint);
+            }
             log_removal_context();
         }
         match host.log_messages() {
@@ -1687,12 +1690,13 @@ pub(crate) fn dred_any() -> bool {
 
 /// Whether only the faulting address of a removed device is kept
 /// (`VICTORY_D3D12_DRED=faults`): no breadcrumbs, no markers and no texts, so
-/// it costs next to nothing and can stay on while the title is played.
+/// it costs next to nothing and can stay on while the title is played. The
+/// one kind a release build has too (off unless asked for): a device removal
+/// then names the address, the allocations around it (objects are named while
+/// it is on) and the title memory copy or heap below it.
 pub(crate) fn dred_faults() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_DRED").is_some_and(|v| v == "faults")
-    })
+    *ON.get_or_init(|| std::env::var_os("VICTORY_D3D12_DRED").is_some_and(|v| v == "faults"))
 }
 
 /// The lists alive while device-removed data is on, by the number their name
@@ -9213,6 +9217,10 @@ struct Meter {
     logged: std::time::Instant,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
+    /// The last frame counted, and the longest gap between two since the
+    /// last frame line, in milliseconds (`VICTORY_STATS`).
+    last: std::time::Instant,
+    worst_ms: f64,
 }
 
 impl Meter {
@@ -9226,6 +9234,8 @@ impl Meter {
             drawn: crate::draw::drawn(),
             logged: now,
             caption: None,
+            last: now,
+            worst_ms: 0.0,
         }
     }
 
@@ -9246,6 +9256,9 @@ impl Meter {
         {
             self.copy_stats_frames += 1;
         }
+        let now = std::time::Instant::now();
+        self.worst_ms = self.worst_ms.max((now - self.last).as_secs_f64() * 1000.0);
+        self.last = now;
         let elapsed = self.since.elapsed();
         if elapsed < std::time::Duration::from_secs(1) {
             return;
@@ -9256,6 +9269,7 @@ impl Meter {
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         let draws = (drawn - self.drawn) as f64 / frames;
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
+        let worst_ms = std::mem::take(&mut self.worst_ms);
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
         let [cpu, gpu] = [0, 1].map(|i| {
             SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames
@@ -9273,6 +9287,16 @@ impl Meter {
         let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
         let refused = BUDGET_NOTES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         let biggest = BUDGET_NOTES[1].swap(0, Ordering::Relaxed);
+        crate::stats::second(&crate::stats::Second {
+            fps,
+            ms,
+            worst_ms,
+            draws,
+            dropped,
+            indirect_empty: refused,
+            preparing_ms: cpu,
+            gpu_wait_ms: gpu,
+        });
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
         );
