@@ -276,12 +276,15 @@ pub(crate) fn install() {
             tracing::warn!("driver hook: amdxc64.dll not loaded");
             return;
         }
+        // A function item cast straight to `usize` is not the code address
+        // (the item is zero-sized). The pointer cast is the address written
+        // into the driver's import slot.
         let hooks = [
-            heap_alloc as usize,
-            heap_free as usize,
-            heap_realloc as usize,
-            virtual_alloc as usize,
-            virtual_free as usize,
+            heap_alloc as *const () as usize,
+            heap_free as *const () as usize,
+            heap_realloc as *const () as usize,
+            virtual_alloc as *const () as usize,
+            virtual_free as *const () as usize,
         ];
         // SAFETY: a loaded image.
         let n = unsafe {
