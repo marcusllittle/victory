@@ -720,6 +720,8 @@ fn a_first_lane_refusal_is_retried_wave_wide() {
         crate::native::HwStage::Cs,
         "a descriptor chosen by control flow"
     ));
+}
+
 /// A dispatch counted in threads: of the last group only the lanes below the
 /// count store (after DexNom/VIctory bc3cd4b0).
 #[test]

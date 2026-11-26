@@ -2099,6 +2099,8 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
             assert_eq!(got, 32, "{backend}: v_dot2_u32_u16 opsel got {got}, want 32");
         },
     );
+}
+
 /// Whether the hardware adapter is an AMD RDNA card's: what the translator
 /// writes for one ([`super::rdna`]) holds there.
 fn rdna_card() -> bool {
