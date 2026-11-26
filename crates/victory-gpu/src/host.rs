@@ -2915,7 +2915,9 @@ struct Flight {
     texture_back_ranges: Vec<(usize, usize)>,
 }
 
-/// One thing in the line of what waits for the card, in order.
+/// One thing in the line of what waits for the card, in order. (Flights are
+/// moved through the line, not copied: no box.)
+#[allow(clippy::large_enum_variant)]
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.

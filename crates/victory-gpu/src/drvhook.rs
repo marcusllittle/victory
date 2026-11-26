@@ -72,7 +72,7 @@ fn record(at: *mut c_void, size: usize) {
     let n = CALLS.fetch_add(1, Relaxed);
     let scale = if size >= BIG {
         1
-    } else if n % SAMPLE == 0 {
+    } else if n.is_multiple_of(SAMPLE) {
         SAMPLE as i64
     } else {
         return;
@@ -247,7 +247,7 @@ fn report() {
             .iter()
             .map(|(h, (f, b, c))| (*b, *c, f.clone(), state.names.get(h).cloned().unwrap_or_default()))
             .collect();
-        all.sort_by(|a, b| b.0.cmp(&a.0));
+        all.sort_by_key(|a| std::cmp::Reverse(a.0));
         all.truncate(3);
         (total, all)
     };

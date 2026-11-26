@@ -1514,7 +1514,7 @@ impl Staging {
                 }
                 let n = FILLED_MIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let us = FILL_US.fetch_add(began.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
-                if n % 500 == 0 {
+                if n.is_multiple_of(500) {
                     tracing::info!(filled = n, ms = us / 1000, "streaming mips filled from the next smaller mip");
                 }
             }
@@ -2241,7 +2241,7 @@ mod allocation_costs {
                 seen.push(digest(&bytes));
             }
         }
-        let text: Vec<u8> = (0..400u32).map(|i| (i * 37 >> 2) as u8).collect();
+        let text: Vec<u8> = (0..400u32).map(|i| ((i * 37) >> 2) as u8).collect();
         for at in 0..399 {
             let mut bytes = text.clone();
             bytes.swap(at, at + 1);
