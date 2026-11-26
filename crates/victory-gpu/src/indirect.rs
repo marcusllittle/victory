@@ -304,8 +304,6 @@ fn rest() -> u32 {
 /// The clamp compiled from `source` (ours, or in the benchmark the one it
 /// replaced).
 fn make_from(device: &ID3D12Device, source: &str) -> windows::core::Result<Clamp> {
-    #[cfg(feature = "diagnostics")]
-    let batched = source == batch::SOURCE;
     let source = &format!("#define WIDEST {}u\n#define REST {}\n{source}", widest(amd(device)), rest());
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
