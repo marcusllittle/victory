@@ -4772,6 +4772,37 @@ fn same_placed_texture(a: &View, b: &View) -> bool {
     }
 }
 
+/// `VICTORY_LOD_CLAMP=1`: a placed view's least level of detail drops the
+/// mips under it. Unset is off.
+fn lod_clamp_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LOD_CLAMP").is_some_and(|v| v == "1"))
+}
+
+/// Whole mips a view's `ResourceMinLODClamp` holds back. 0 when the view
+/// does not say so, or says less than one mip.
+fn min_lod_mip(desc: &[u32]) -> u32 {
+    let Some(words) = desc.get(..10).and_then(|w| <[u32; 10]>::try_from(w).ok()) else {
+        return 0;
+    };
+    let d = srv_desc(&words);
+    // SAFETY: the member the dimension names.
+    let clamp = unsafe {
+        match d.ViewDimension {
+            D3D12_SRV_DIMENSION_TEXTURE2D => d.Anonymous.Texture2D.ResourceMinLODClamp,
+            D3D12_SRV_DIMENSION_TEXTURE2DARRAY => d.Anonymous.Texture2DArray.ResourceMinLODClamp,
+            D3D12_SRV_DIMENSION_TEXTURECUBE => d.Anonymous.TextureCube.ResourceMinLODClamp,
+            D3D12_SRV_DIMENSION_TEXTURECUBEARRAY => d.Anonymous.TextureCubeArray.ResourceMinLODClamp,
+            _ => 0.0,
+        }
+    };
+    lod_floor(clamp)
+}
+
+fn lod_floor(clamp: f32) -> u32 {
+    if clamp.is_finite() && clamp >= 1.0 { clamp.floor().min(32.0) as u32 } else { 0 }
+}
+
 /// A shader view of a texture the title placed in memory itself, as a view
 /// of the resource made for that memory (on first use).
 pub(crate) fn placed_texture(view: &View) -> Option<View> {
@@ -4784,7 +4815,15 @@ pub(crate) fn placed_texture(view: &View) -> Option<View> {
     }
     let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
     let texture = crate::resource::texture_at(address, resource)?;
-    crate::resource::want_level(texture, crate::resource::first_mip(desc));
+    // A least level of detail holds the larger mips back, the same as a view
+    // that starts further in. Off unless `VICTORY_LOD_CLAMP=1`: the build
+    // this was taken from had no such view, and the host copy is made whole
+    // from the first mip the view names.
+    let mut first = crate::resource::first_mip(desc);
+    if lod_clamp_on() {
+        first = first.max(min_lod_mip(desc));
+    }
+    crate::resource::want_level(texture, first);
     Some(View::Shader(texture as usize, desc[..10].try_into().ok()))
 }
 
@@ -5079,6 +5118,31 @@ mod tests {
         // The view from level 1 goes: the texture is viewed from level 3.
         spans.forget(2);
         assert_eq!(spans.first_viewed(0x1_0000), Some(3));
+    }
+
+    #[test]
+    fn a_least_level_of_detail_holds_whole_mips_back() {
+        assert_eq!(lod_floor(0.0), 0);
+        assert_eq!(lod_floor(0.9), 0);
+        assert_eq!(lod_floor(2.7), 2);
+        assert_eq!(lod_floor(40.0), 32);
+        assert_eq!(lod_floor(f32::NAN), 0);
+        let mut desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            ..Default::default()
+        };
+        desc.Anonymous.Texture2D.MostDetailedMip = 0;
+        desc.Anonymous.Texture2D.MipLevels = 8;
+        desc.Anonymous.Texture2D.ResourceMinLODClamp = 3.2;
+        // SAFETY: the descriptor is plain data of 40 bytes, the view's words.
+        let words: [u32; 10] = unsafe { std::mem::transmute(desc) };
+        assert_eq!(min_lod_mip(&words), 3);
+        let mut buffer = desc;
+        buffer.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        let words: [u32; 10] = unsafe { std::mem::transmute(buffer) };
+        assert_eq!(min_lod_mip(&words), 0);
     }
 
     /// Views of one placed texture are told from views of others by the
