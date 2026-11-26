@@ -330,6 +330,12 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 Every build appends crashes and host GPU failures to `crashes.log` in the
 title's data folder.
 
+Release builds take two of the measuring switches as well (both off unless set):
+`VICTORY_STATS=<file>` writes frame time, card memory and private memory once a
+second as CSV (`scripts\stats-summary.ps1` reads it), and
+`VICTORY_D3D12_DRED=faults` names the faulting address of a removed device.
+See [rtx3060-first-run.md](rtx3060-first-run.md).
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](../LICENSE).

@@ -30,6 +30,13 @@
 //!
 //! `VICTORY_AMBIENT_SHADE=<strength>,<radius in metres>` sets the creases.
 //!
+//! `VICTORY_AMBIENT_FLOOR=<level>` (off unless set): the estimate is no
+//! darker than that, on the same scale as `constant:<level>`, shaded in
+//! creases. The estimate follows what is on screen, so a room lit only by
+//! light that would have bounced in (no lamp, no window in view) sends out
+//! next to nothing and stays black; the floor is for those. It does not
+//! raise what the title's own resolve is allowed to keep. Try 0.05 to 0.2.
+//!
 //! The air of a room is lit by the same probes: without rays they hold the
 //! sky's light indoors too, a brown veil at sunset. `VICTORY_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
@@ -109,6 +116,23 @@ fn air() -> f32 {
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_AIR").unwrap_or_default();
         set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
+    })
+}
+
+/// The least the estimate gives (`VICTORY_AMBIENT_FLOOR=<level>`; unset, 0
+/// or not a number: none).
+fn parse_floor(set: &str) -> f32 {
+    set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
+}
+
+fn least() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let least = parse_floor(&std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default());
+        if least > 0.0 {
+            tracing::info!(least, "the stand-in's estimate has a floor (VICTORY_AMBIENT_FLOOR)");
+        }
+        least
     })
 }
 
@@ -213,7 +237,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=14, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
+#define RS "RootConstants(num32BitConstants=15, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -223,7 +247,7 @@ cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
     float follow; float most; float air; float jump;
-    float fresh; float dt;
+    float fresh; float dt; float least;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -423,6 +447,9 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float top = max(dot(found, LUMA) * bound, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
+    // `least` > 0: no darker than that (after the bound, which stays the
+    // estimate's own).
+    found = max(found, float3(1.0, 0.98, 0.94) * least * open);
     light[p] = pack(max(was, found));
 }
 #endif
@@ -549,7 +576,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.points);
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
-    let mut words = [0u32; 14];
+    let mut words = [0u32; 15];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
@@ -561,6 +588,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[11] = settle().map_or(0.0, |s| s.jump).to_bits();
     words[12] = settle().map_or(0.0, |s| s.fresh).to_bits();
     words[13] = (frame_ms(role) / 1000.0).to_bits();
+    words[14] = least().to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -568,7 +596,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 14, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, words.len() as u32, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
@@ -620,6 +648,22 @@ mod tests {
         let share = follow_share(33.0, 250.0);
         assert!(share > 0.12 && share < 0.13, "{share}");
         assert!((follow_share(250.0, 250.0) - (1.0 - (-1.0f32).exp())).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_floor_is_off_until_asked() {
+        assert_eq!(parse_floor(""), 0.0);
+        assert_eq!(parse_floor("0"), 0.0);
+        assert_eq!(parse_floor("-0.1"), 0.0);
+        assert_eq!(parse_floor("nan"), 0.0);
+        assert_eq!(parse_floor(" 0.1 "), 0.1);
+    }
+
+    #[test]
+    fn the_root_constants_are_the_words_written() {
+        assert!(SOURCE.contains("num32BitConstants=15"));
+        let fields = SOURCE.split("cbuffer Set").nth(1).and_then(|s| s.split("};").next()).unwrap();
+        assert_eq!(fields.matches(';').count(), 15, "{fields}");
     }
 
     #[test]
