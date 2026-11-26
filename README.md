@@ -12,7 +12,7 @@ $env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
 
 `pareto-residency` selects Series S and the residency settings measured on RTX. `rtx3060` starts from that preset and then caps a 12 GB NVIDIA card: low textures, a 192 MiB staging budget, 2 GiB of title memory on the card, eight spare texture-pool blocks, no raw-twin descriptor heap, and the AMD compile-skip hash left unset. `VICTORY_CARD_FETCH_INFLIGHT` and `VICTORY_FIRSTLANE_OWN` stay off. Shader cache defaults to `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse a cache outside the checkout.
 
-Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required. `scripts\play.ps1 -Rtx3060 -Build release -Exe <your executable>` is the same preset.
+Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required. `scripts\play.ps1 -Rtx3060 -Build release -Exe <your executable>` is the same preset. The first-run order (shader cache, then pipelines) is [docs/rtx3060-first-run.md](docs/rtx3060-first-run.md).
 
 The sections below describe the upstream AMD fork and its separate launcher.
 

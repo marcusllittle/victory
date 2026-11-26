@@ -62,6 +62,11 @@ if /i "%~1"=="rtx3060" (
   rem No raw-twin descriptor heap. That heap is 2^22 views; NVIDIA caps near
   rem 1,000,000 and hung on an index past the heap (descriptor/host.rs).
   if not defined VICTORY_RAW_VIEWS set "VICTORY_RAW_VIEWS=0"
+  rem Do not keep empty upload and texture blocks for five minutes. With 64 GB
+  rem of RAM the default does; other programs often need that RAM (host.rs).
+  if not defined VICTORY_KEEP_FREED set "VICTORY_KEEP_FREED=0"
+  rem Blocks made ahead of the first use. 12 is 768 MiB; 4 is 256 MiB (pool.rs).
+  if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
 )
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
 exit /b %errorlevel%

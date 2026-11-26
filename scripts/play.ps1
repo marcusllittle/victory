@@ -38,6 +38,8 @@ if ($Rtx3060) {
     $settings.VICTORY_TEXTURE_STAGE_MB = '192'
     $settings.VICTORY_POOL_SPARES = '8'
     $settings.VICTORY_RAW_VIEWS = '0'
+    $settings.VICTORY_KEEP_FREED = '0'
+    $settings.VICTORY_RIPE_BLOCKS = '4'
 }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 

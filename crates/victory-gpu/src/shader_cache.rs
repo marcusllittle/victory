@@ -106,6 +106,9 @@ pub(crate) fn translation() -> [u8; 32] {
 /// can do decides the form of some programs.
 pub fn precompile(container: &[u8]) -> Result<bool, String> {
     let _ = crate::host::host();
+    // The same view-heap cap and wave width a run with these `VICTORY_*`
+    // settings will use, so the cache key matches that run.
+    crate::descriptor::host::probe_view_limit();
     let misses = MISSES.load(Ordering::Relaxed);
     host_shader(container)?;
     // (Counts other threads' misses too: the caller only adds them up.)
@@ -133,6 +136,7 @@ fn translate(container: &[u8]) -> Result<HostShader, String> {
 /// already. An `Err` is a shader that does not translate (a run drops its
 /// draws as well), or one whose entry did not read back.
 pub fn warm(container: &[u8]) -> Result<bool, String> {
+    let _ = crate::host::host();
     crate::descriptor::host::probe_view_limit();
     let cache = CACHE
         .get()
