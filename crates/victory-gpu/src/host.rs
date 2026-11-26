@@ -3949,6 +3949,9 @@ fn late_line(frames: f64) {
 pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
+/// Indirect-execution notes for a removed-device report. Only a diagnostics
+/// build records them (`VICTORY_D3D12_DRED`); a release build does not.
+#[cfg(any(feature = "diagnostics", test))]
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
@@ -8597,7 +8600,12 @@ impl Batch {
                     }
                     Step::GpuWrite(shadow, ..) => Touch::Write(std::sync::Arc::as_ptr(shadow) as usize),
                     Step::Copy(..) if taken(list, i) => Touch::Nothing,
-                    Step::Copy(..) | Step::Run(_) | Step::Placed(_) => break 'steps,
+                    // A write of title memory: refreshes after it are that
+                    // write's to order (`written_spans` stops at `Title`).
+                    Step::Copy(..) | Step::Run(_) | Step::Placed(_) => {
+                        touches.push(Touch::Title);
+                        break 'steps;
+                    }
                     _ => Touch::Nothing,
                 });
             }
@@ -9281,6 +9289,8 @@ impl Meter {
         late_line(frames);
         crate::queue::behind_line(frames);
         card_clock_line(frames, ms);
+        // What Direct3D still holds, counted down when the objects are destroyed.
+        tracing::info!("{}", crate::alive::line());
         #[cfg(feature = "diagnostics")]
         spans::line(frames);
         crate::shadow::back_line(frames);
