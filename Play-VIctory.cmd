@@ -4,8 +4,8 @@ rem pareto-residency: Series S and the residency settings measured on RTX.
 rem rtx3060: that preset, plus a 12 GB NVIDIA card (64 GB system RAM is enough;
 rem the limit is the card). Builds from this tree only: target\release\victory.exe,
 rem or target\diag\victory.exe when the release binary is not there.
-if not "%~1"=="" if /i not "%~1"=="pareto-residency" if /i not "%~1"=="rtx3060" (
-  echo Usage: Play-VIctory.cmd pareto-residency ^| rtx3060 1>&2
+if not "%~1"=="" if /i not "%~1"=="pareto-residency" if /i not "%~1"=="rtx3060" if /i not "%~1"=="rtx3060-1080p" (
+  echo Usage: Play-VIctory.cmd pareto-residency ^| rtx3060 ^| rtx3060-1080p 1>&2
   exit /b 2
 )
 if not defined VICTORY_GAME_DIR (
@@ -43,7 +43,10 @@ if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
-if /i "%~1"=="rtx3060" (
+if /i "%~1"=="rtx3060" goto :rtx3060
+if /i "%~1"=="rtx3060-1080p" goto :rtx3060
+goto :run
+:rtx3060
   rem Largest mips left out so textures fit a 12 GB card (resource.rs).
   set "VICTORY_TEXTURE_LOW=2"
   rem Off: on an NVIDIA card this made GPU time worse (host.rs).
@@ -67,6 +70,15 @@ if /i "%~1"=="rtx3060" (
   if not defined VICTORY_KEEP_FREED set "VICTORY_KEEP_FREED=0"
   rem Blocks made ahead of the first use. 12 is 768 MiB; 4 is 256 MiB (pool.rs).
   if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
-)
+  rem The stand-in's slow mean follows the clock (250 ms, jump of 3x at once)
+  rem instead of 0.04 of the way each frame. Unset keeps the per-frame mean (ambient.rs).
+  if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3"
+  rem 1080p is a separate preset. The output sites are byte-checked and left
+  rem alone on another build. Render scale 1 draws at that size (resolution.rs).
+  if /i "%~1"=="rtx3060-1080p" (
+    if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+    if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=1"
+  )
+:run
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
 exit /b %errorlevel%

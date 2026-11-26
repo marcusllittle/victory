@@ -3,6 +3,7 @@
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Rtx3060      pareto-residency plus a 12 GB NVIDIA card (Series S). See Play-VIctory.cmd.
+# -Output1080   with -Rtx3060: 1920x1080 output and render scale 1. Not the default.
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
@@ -11,6 +12,7 @@ param(
     [switch]$Safe,
     [switch]$RayTracing,
     [switch]$Rtx3060,
+    [switch]$Output1080,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
@@ -40,6 +42,11 @@ if ($Rtx3060) {
     $settings.VICTORY_RAW_VIEWS = '0'
     $settings.VICTORY_KEEP_FREED = '0'
     $settings.VICTORY_RIPE_BLOCKS = '4'
+    $settings.VICTORY_AMBIENT_SETTLE = '250,3'
+    if ($Output1080) {
+        $settings.VICTORY_OUTPUT = '1920x1080'
+        $settings.VICTORY_RENDER_SCALE = '1'
+    }
 }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 

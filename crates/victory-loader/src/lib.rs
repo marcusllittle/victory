@@ -25,6 +25,7 @@
 mod console_insn;
 mod crash;
 pub mod prepare;
+pub mod resolution;
 pub(crate) mod publish;
 pub mod resolve;
 #[cfg(all(windows, feature = "diagnostics"))]

@@ -112,6 +112,91 @@ fn air() -> f32 {
     })
 }
 
+/// How the slow mean of the light around follows the frames
+/// (`VICTORY_AMBIENT_SETTLE=<time constant in ms>[,<jump factor>[,<fresh
+/// seconds>]]`). Unset, empty or `0`: 0.04 of the way a frame, as before
+/// (25 frames: 0.8 s at 30 frames a second, 2–4 s at 7–13). Set, the same
+/// share of the way a second whatever the frame rate, and a change by more
+/// than the jump factor (default 3; 0: none) is taken at once. Fresh seconds
+/// (default 0: none): for that long after such a jump the light the title's
+/// own resolve left is bounded by the estimate, not four times it.
+///
+/// Off unless the variable is set. The measurement this follows used 250 ms
+/// and a jump factor of 3.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Settle {
+    ms: f32,
+    jump: f32,
+    fresh: f32,
+}
+
+fn parse_settle(spec: &str) -> Option<Settle> {
+    let mut parts = spec.split(',').map(|p| p.trim().parse::<f32>().ok());
+    let ms = parts.next().flatten().filter(|v| v.is_finite() && *v > 0.0)?;
+    let jump = parts.next().flatten().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(3.0);
+    let fresh = parts.next().flatten().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+    Some(Settle { ms, jump, fresh })
+}
+
+fn settle() -> Option<Settle> {
+    static SET: OnceLock<Option<Settle>> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let Ok(set) = std::env::var("VICTORY_AMBIENT_SETTLE") else {
+            return None;
+        };
+        let parsed = parse_settle(&set);
+        if let Some(s) = parsed {
+            tracing::info!(
+                ms = s.ms,
+                jump = s.jump,
+                fresh = s.fresh,
+                "the stand-in's mean of the light around settles by the clock (VICTORY_AMBIENT_SETTLE)"
+            );
+        }
+        parsed
+    })
+}
+
+/// The share of the way toward the new mean in `dt` milliseconds.
+fn follow_share(dt: f32, ms: f32) -> f32 {
+    1.0 - (-dt / ms).exp()
+}
+
+/// The share of the way the slow mean goes at this frame's keeping
+/// ([`Role::Radiance`]; the other passes do not read it).
+fn follow(role: Role) -> f32 {
+    match settle() {
+        Some(settle) if role == Role::Radiance => follow_share(frame_ms(role), settle.ms),
+        _ => 0.04,
+    }
+}
+
+/// Milliseconds since the last keeping ([`Role::Radiance`], once a frame);
+/// the first, and after a pause of over a second, as a frame of 30. Other
+/// roles: the last answer.
+fn frame_ms(role: Role) -> f32 {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    static DT: AtomicU32 = AtomicU32::new(0x4204_0000); // 33.0
+    if role != Role::Radiance {
+        return f32::from_bits(DT.load(Relaxed));
+    }
+    // Asked twice in one keeping: the words and the share.
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    if ASKED.swap(now, Relaxed) == now {
+        return f32::from_bits(DT.load(Relaxed));
+    }
+    let last = LAST.swap(now, Relaxed);
+    let dt = match now.saturating_sub(last) {
+        0 => 1.0,
+        dt if last == 0 || dt > 1000 => 33.0,
+        dt => dt as f32,
+    };
+    DT.store(dt.to_bits(), Relaxed);
+    dt
+}
+
 /// Strength and radius of the creases' shade.
 fn shade() -> [f32; 2] {
     static SET: OnceLock<[f32; 2]> = OnceLock::new();
@@ -128,7 +213,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=12, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
+#define RS "RootConstants(num32BitConstants=14, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -137,7 +222,8 @@ const SOURCE: &str = r#"
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
-    float follow; float most; float air; float unused;
+    float follow; float most; float air; float jump;
+    float fresh; float dt;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -179,7 +265,14 @@ void mean() {
     for (uint i = 0; i < CELLS; i++) sum += cells[i].rgb;
     float4 was = cells[CELLS];
     float3 now = sum / CELLS;
-    cells[CELLS] = float4(was.a > 0.0 ? lerp(was.rgb, now, follow) : now, 1.0);
+    // `jump` > 0: a change of more than that factor either way is followed
+    // at once, as a new room is.
+    float a = max(dot(now, LUMA), 1e-5), b = max(dot(was.rgb, LUMA), 1e-5);
+    bool jumped = jump > 0.0 && max(a / b, b / a) > jump;
+    // Seconds since the light around last jumped (from 0.001; 0: nothing
+    // kept yet). With `jump` at 0 this stays a flag the lerp already used.
+    float age = was.a > 0.0 && !jumped ? was.a + dt : 0.001;
+    cells[CELLS] = float4(was.a > 0.0 ? lerp(was.rgb, now, jumped ? 1.0 : follow) : now, age);
 }
 #endif
 
@@ -323,7 +416,11 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
-    float top = max(dot(found, LUMA) * most, 1e-6);
+    // For `fresh` seconds after the light around jumped (a new room) the
+    // title's leftover counts for no more than the estimate, then up to
+    // `most` times it again. `fresh` at 0 keeps the old bound.
+    float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
+    float top = max(dot(found, LUMA) * bound, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
     light[p] = pack(max(was, found));
@@ -452,15 +549,18 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.points);
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
-    let mut words = [0u32; 12];
+    let mut words = [0u32; 14];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
     words[6] = views.size[0];
     words[7] = views.size[1];
-    words[8] = 0.04f32.to_bits();
+    words[8] = follow(role).to_bits();
     words[9] = 4.0f32.to_bits();
     words[10] = air().to_bits();
+    words[11] = settle().map_or(0.0, |s| s.jump).to_bits();
+    words[12] = settle().map_or(0.0, |s| s.fresh).to_bits();
+    words[13] = (frame_ms(role) / 1000.0).to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -468,7 +568,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 12, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, 14, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
@@ -509,6 +609,17 @@ mod tests {
         assert_eq!(parse("0.8"), Set::Estimate(0.8));
         assert_eq!(parse("constant:0.3"), Set::Constant(0.3));
         assert_eq!(parse("constant:nan"), Set::Off);
+    }
+
+    #[test]
+    fn settle_is_off_until_asked_and_follows_the_clock() {
+        assert_eq!(parse_settle(""), None);
+        assert_eq!(parse_settle("0"), None);
+        assert_eq!(parse_settle("250,3"), Some(Settle { ms: 250.0, jump: 3.0, fresh: 0.0 }));
+        assert_eq!(parse_settle("250,0,1.5"), Some(Settle { ms: 250.0, jump: 0.0, fresh: 1.5 }));
+        let share = follow_share(33.0, 250.0);
+        assert!(share > 0.12 && share < 0.13, "{share}");
+        assert!((follow_share(250.0, 250.0) - (1.0 - (-1.0f32).exp())).abs() < 1e-5);
     }
 
     #[test]
