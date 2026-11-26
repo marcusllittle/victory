@@ -1,97 +1,131 @@
-# victory — rorodev6's build
+# VIctory on an RX 7900 XTX
 
-A Windows runtime for **an Xbox Series X|S title**, run from game files you own yourself. This branch is maintained by
-**[rorodev6](https://github.com/rorodev6)**: it combines several community forks into one build tuned and tested on an
-**AMD Radeon RX 6700 XT (12 GB)**, and adds low-memory texture loading so the game fits a 12 GB card.
+## Run a build from this checkout
 
-The title's original x86-64 code runs unchanged inside the process; the runtime provides the Xbox/GDK platform beneath it
-and translates the console's GPU data and shaders (D3D12.X / GFX10 → D3D12 / DXIL).
+Install the pinned Rust toolchain (1.98.1) and the MSVC C++ build tools with a Windows SDK, then build the runner. The launcher only starts `target\release\victory.exe` (or `target\diag\victory.exe` if the release binary is not there).
+
+```powershell
+cargo build --release --locked -p victory
+$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
+.\Play-VIctory.cmd pareto-residency
+```
+
+`pareto-residency` selects Series S and the residency settings measured on RTX. `rtx3060` starts from that preset and then caps a 12 GB NVIDIA card: low textures, a 192 MiB staging budget, 2 GiB of title memory on the card, eight spare texture-pool blocks, no raw-twin descriptor heap, and the AMD compile-skip hash left unset. `VICTORY_CARD_FETCH_INFLIGHT` and `VICTORY_FIRSTLANE_OWN` stay off. Shader cache defaults to `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse a cache outside the checkout.
+
+Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required. `scripts\play.ps1 -Rtx3060 -Build release -Exe <your executable>` is the same preset.
+
+The sections below describe the upstream AMD fork and its separate launcher.
+
+A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
+that runs an Xbox Series title natively on Windows from files the user supplies.
+This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
+one PC, without giving up the picture. It is not there yet.
+
+**This repository contains no game files, code or assets.** You need your own
+copy of the game. It is not affiliated with or endorsed by the game's developer
+or publisher.
+
+## Where it stands (2026-11-25)
+
+Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
+RX 7900 XTX, 1440p, the Series X profile.
+
+| | |
+|---|---|
+| Menus, videos, loading screens | 30 fps |
+| Prologue, indoors | 50-75 ms a frame (13-20 fps) |
+| First mission with the boat | 46-53 ms (19-22 fps) |
+| Street chase with many cars and people | 100-165 ms (6-10 fps), single frames far longer |
+| Outdoors on foot, the camp | 60-90 ms |
+| Flying | 42-57 ms |
+| Longest session so far | 41 minutes, no crash |
+| Memory | 40-46 GB of private memory: **64 GB of RAM recommended** |
+
+It started at 280 ms a frame in the same scenes two days earlier.
+
+What is known to be wrong:
+
+- Trees, plants and far buildings flicker outdoors in some places.
+- Rooms with little direct light are too dark without `-RayTracing`.
+- Textures of what just came into view appear late while the title streams.
+- The first run with a new driver or a new build stutters while the driver makes
+  pipelines (`victory warm` makes them ahead).
+- Recording a frame in the world makes the title's own watchdog end it.
+
+## How to run it
+
+You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
+model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
+tools, and your own dump of the title.
+
+```powershell
+git clone https://github.com/avatarmanz/VIctory-7900XTX
+cd VIctory-7900XTX
+copy victory.example.toml victory.toml      # then set your paths, outside this folder
+cargo build --locked --profile diag -p victory --features diagnostics
+scripts\play.ps1 -Exe <path of your copy's executable>
+```
+
+`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
+something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+
+Before the first run, ahead of time (both can be stopped and go on later):
+
+```powershell
+target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
+target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+```
+
+Commands, debugging switches and upstream's own description:
+[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
+described in a comment where it is read.
+
+## What is different here
+
+In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+
+- **List calls are written down, not carried out, on the title's threads**
+  (`VICTORY_THIN`): eight threads of ours translate them.
+- **Submissions are prepared by a thread of ours and joined**
+  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
+  threads spread: refreshes, compares (AVX2), descriptor records, landings.
+- **What shaders wrote comes back beside the write guards**, by the dwords that
+  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
+- **Buffer fills that need bytes still on the card are done on the card**
+  (`VICTORY_CARD_STEPS`) instead of waiting for it.
+- **The title's writes are caught more cheaply**: one view opened at a fault,
+  blocks that rest, places in the title's code that look before they write.
+- **Textures go up on a copy queue of their own** and a slot shows one only after
+  its upload ran, which also ended a device loss that came every 15 minutes or so.
+- **Boats float**: textures that shaders write and the title's CPU reads go back
+  to title memory (from fxceless and Geckomacabre, on by default here).
+- **Frame record and replay** with per-pass times and shader variants compared
+  turn by turn ([docs/replay.md](docs/replay.md)).
 
 > No game data is included or distributed here. You need your own copy of the game.
 
-## What this build is
+This is a tree of other people's work with more on top. The history is kept, and
+commits taken from elsewhere name the commit and its author.
 
-| Part | Source |
-|------|--------|
-| Base runtime | [Marvisak/VIctory](https://github.com/Marvisak/VIctory) |
-| World rendering, lighting, relay and many shader fixes | [uiliannn/VItoriaBr](https://github.com/uiliannn/VItoriaBr) (commit `2b3c339`) |
-| Draw windows, copy merging, late waits, driver watch | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (hyphennn) |
-| Low textures, merge of the above, AMD tuning, Discord status | **rorodev6** (this branch) |
-
-### rorodev6's changes
-
-- **`VICTORY_TEXTURE_LOW` (1 or 2):** leaves out the largest mip levels of the title's textures so ~15 GB of textures fit a
-  12 GB card. Without it, textures waiting for room show up purple or black and assets fail to appear.
-- **Low textures and tiled textures work together:** a low texture is made whole at its reduced size instead of tiled. Tiles
-  count the host texture's levels while views, uploads and copies shift the title's levels by the left-out mips; doing
-  both shifted a view twice.
-- **Merged the VItoriaBr and fxceless lines** (copy statistics from both sides; descriptor views shift by the tiles' first
-  level, then by the left-out mips).
-- **Discord rich presence, an "alive" check and the driver watch** carried over from the fxceless line.
-- A tested AMD preset (below).
-
-## Status (2026-11-25, RX 6700 XT 12 GB, Ryzen, 32 GB RAM)
-
-| Stage | State |
-|-------|-------|
-| Boot, menus, intro video | ✅ Works (videos up to ~40 fps) |
-| Profile and saves | ✅ Works |
-| 3D world: opening cinematic, prologue, open world | 🟡 Runs at **~3.2 fps** |
-| Characters | 🔴 Some heads, hair and beards missing (POPS pixel shaders not translated yet) |
-| Textures | 🟡 Mostly fine with `TEXTURE_LOW=2`; a few purple ones while an area loads |
-| Shaders | 25,985 containers, ~240 still do not translate |
-
-The frame time is mostly the emulation itself (GPU work at 2560x1440 internally, copying memory back to the title, and the
-submitting thread waiting on a lock), not a single expensive setting.
-
-## What was tried to raise the frame rate (2026-11-25, RX 6700 XT)
-
-| Attempt | Result |
-|---------|--------|
-| `VICTORY_DISPLAY_MODE=1920x1080` | No gain: the title keeps a 3840x2160 swap chain and renders at 2560x1440 inside |
-| hyphennn's newer switches (`VICTORY_ASYNC_SUBMIT`, `VICTORY_ASYNC_PRESENT`, `VICTORY_QUEUE2=3`, fxceless `0b0074e`, not in this branch) | Copy-back 90 -> 50 ms a frame, but still ~3.3 fps: the GPU itself (160-195 ms a frame) is the limit on this card |
-| `--console series-s` | Stays on a black screen at boot |
-| The title's settings file (`storage/settings/settings.xml`: `resolutionFullscreen`, `fsrQuality`) | Ignored by the console build: same 2560x1440 targets, same GPU time |
-| GPU timestamps | The title writes 4 a frame at one address, at the real frame pace; no dynamic resolution reacts to them |
-
-The internal render size comes from a pair of globals the title fills (width at `0x1499fecf8`, height at
-`0x1499fecfc` of `game_scarlett_master.exe` 1.0.2.1, preferred base); the render-target setup function at `0x141edb000`
-reads them. Lowering the render size at run time from there is the open lead.
-
-## Build
-
-```powershell
-copy victory.example.toml victory.toml        # set paths outside the repository
-cargo build --profile diag -p victory --features diagnostics
-.\target\diag\victory.exe warm <game_dir>     # optional: pre-translate every shader into the cache (~10 min)
-```
-
-## Recommended preset (RX 6700 XT 12 GB)
-
-```powershell
-$env:VICTORY_CACHE_DIR        = "<a folder outside the repo>"
-$env:VICTORY_DATA_DIR         = "<a folder outside the repo>"   # saves
-$env:VICTORY_TEXTURE_LOW      = "2"       # textures fit 12 GB
-$env:VICTORY_INDIRECT_WINDOW  = "1"       # if the game loses the GPU, remove this first
-$env:VICTORY_LATE_WAIT        = "1"       # stable level on this card
-$env:VICTORY_CARD_REHASH_RUNS = "1"
-$env:VICTORY_KEEP_VIEWS       = "0"
-$env:VICTORY_WIDE_BACK        = "1"
-$env:VICTORY_WIDE_REFRESH     = "1"
-$env:VICTORY_WIDE_MERGE       = "1"
-$env:VICTORY_JOIN_COPIES      = "1"
-$env:VICTORY_TEXTURE_NO_WAIT  = "1"       # if a texture flickers, remove this first
-$env:VICTORY_NO_COMPILE       = "39f0e9aeb156a61c"   # a shader the AMD driver never finishes compiling
-# $env:VICTORY_DISPLAY_MODE   = "1920x1080"          # optional; the title still renders at 2560x1440 inside
-
-.\target\diag\victory.exe run "<game_dir>\<title_exe>" --execute
-```
-
-## Credits
-
-Built on the work of Marvisak (VIctory), uiliannn and the VItoriaBr contributors, and hyphennn (fxceless) and the
-victory-fork contributors. The previous README of the base is kept as [README.upstream.md](README.upstream.md).
+- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
+  contributors: the loader, the runtime services, the Direct3D 12 back end and
+  the shader recompiler.
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
+  this one started from, and the people whose pull requests it carries.
+- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
+  cube gradients, sparse textures.
+- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
+  the ambient light idea, pipeline workers, and work by romainhedouin.
+- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
+- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
+  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
+  reads into title memory.
+- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
+- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
+  title behaves under another layer; no code of it is here.
+- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
 
 ## License
 
-GPL-3.0-or-later, like the projects it is based on. See [LICENSE](LICENSE).
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
+covered is named in [docs/asset-policy.md](docs/asset-policy.md).
