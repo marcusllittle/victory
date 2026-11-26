@@ -1729,6 +1729,7 @@ mod tests {
     }
 
     /// A pixel program of `words` with no user data.
+    #[cfg_attr(not(windows), allow(dead_code))] // used only by Windows-only tests
     fn emit_native(words: &[u32], input_addr: u32) -> NativeProgram {
         NativeProgram {
             stage: HwStage::Ps,
@@ -1963,6 +1964,7 @@ mod tests {
             TRIANGLE | EDGE_FLAGS,
             TRIANGLE | EDGE_FLAGS | CULL,
         ] {
+            #[cfg_attr(not(windows), allow(unused_variables))] // used by the Windows-only checks below
             let ms = triangle_mesh(prim).unwrap_or_else(|e| panic!("{prim:#x}: {e}"));
             #[cfg(windows)]
             if let Some(v) = validator.as_mut() {
@@ -3243,6 +3245,7 @@ mod lds_bounds_tests {
         w.push(0x887E_027E); // s_or_b32 exec_lo, exec_lo, s2
         w.push(S_ENDPGM);
 
+        #[cfg_attr(not(windows), allow(unused_variables))] // used by the Windows-only checks below
         let cs = compile_lds_cs(&w, false, 24, 1, [64, 1, 1]).unwrap();
         #[cfg(windows)]
         {
@@ -3339,6 +3342,7 @@ mod lds_bounds_tests {
         w.extend(buf_store_dword(7, 8, 12, 0));
         w.push(S_ENDPGM);
 
+        #[cfg_attr(not(windows), allow(unused_variables))] // used by the Windows-only checks below
         let cs = compile_lds_cs(&w, false, 10, 1, [64, 1, 1]).unwrap();
         #[cfg(windows)]
         {
@@ -3450,6 +3454,7 @@ mod lds_bounds_tests {
         // WaveSize(32) is emitted for wave64-on-wave32 with LDS; WARP refuses
         // explicit WaveSize(32) PSOs, so execute on hardware GPU when present
         // (`compile_lds_cs` already validates the container with `dxil.dll`).
+        #[cfg_attr(not(windows), allow(unused_variables))] // used by the Windows-only checks below
         let cs = compile_lds_cs(&w, true, 6, 1, [64, 1, 1]).unwrap();
         #[cfg(windows)]
         {
