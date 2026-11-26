@@ -138,11 +138,26 @@ impl Pending {
     }
 
     fn make(&self) {
-        self.made.get_or_init(|| {
+        self.make_with(|| {
             let began = Instant::now();
             let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
             super::library::note_time(&self.key, began.elapsed().as_millis() as u64);
             made
+        });
+    }
+
+    /// Builds the pipeline and always finishes the queue entry, even when
+    /// `build` panics. A panic used to skip the wake below, so every later
+    /// pipeline on that worker waited out the title's watchdog.
+    fn make_with(&self, build: impl FnOnce() -> Option<HostPipeline>) {
+        self.made.get_or_init(|| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
+                Ok(pipeline) => pipeline,
+                Err(_) => {
+                    tracing::warn!("host pipeline build panicked; the queue entry is finished");
+                    None
+                }
+            }
         });
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -574,6 +589,25 @@ fn drained() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panicked build finishes its queue entry (so the worker continues)
+    /// and stays finished: a second make does not build again.
+    #[test]
+    fn a_panicking_pipeline_is_refused_and_the_worker_continues() {
+        let bad = Arc::new(Pending::new(Vec::new(), None));
+        let good = Arc::new(Pending::new(Vec::new(), None));
+        let failed = bad.clone();
+        let next = good.clone();
+        let worker = std::thread::spawn(move || {
+            failed.make_with(|| panic!("synthetic pipeline build panic"));
+            next.make_with(|| None);
+        });
+        worker.join().expect("the pipeline worker should survive");
+        assert!(matches!(bad.made.get(), Some(None)));
+        assert!(matches!(good.made.get(), Some(None)));
+        bad.make_with(|| panic!("the refused pipeline should stay complete"));
+        assert!(matches!(bad.made.get(), Some(None)));
+    }
 
     #[test]
     fn worker_count_follows_the_processors_and_the_switch() {
