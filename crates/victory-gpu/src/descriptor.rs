@@ -45,10 +45,19 @@ struct Placement {
     size: u64,
 }
 
+/// Identity of a host descriptor heap. A later heap can be allocated at the
+/// same address after this one is freed; dynamic-slot ranges remember the
+/// identity so a stale list does not free the new heap's slots.
+#[cfg(windows)]
+static NEXT_HEAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 #[repr(C)]
 pub(crate) struct Heap {
     object: Object,
     desc: HeapDesc,
+    /// Stable for the life of this allocation.
+    #[cfg(windows)]
+    pub(crate) id: u64,
     /// The first descriptor: in `memory`, or in the title's own memory.
     pub(crate) start: u64,
     memory: Option<Memory>,
@@ -613,13 +622,18 @@ pub(crate) fn with_heap<T>(heap: usize, f: impl FnOnce(&Heap) -> T) -> Option<T>
 /// Gives back dynamic slots of the host heap behind the title heap at
 /// `heap`, if that heap still exists.
 #[cfg(windows)]
-pub(crate) fn release_dynamic(heap: usize, first: u32, n: u32) {
+pub(crate) fn release_dynamic(heap: usize, id: u64, first: u32, n: u32) {
     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
-    if heaps.iter().any(|&(_, _, h)| h == heap)
+    if heaps.iter().any(|&(_, _, h)| h == heap) {
         // SAFETY: registered heaps are live (removed when dropped).
-        && let Some(Some(host)) = unsafe { &*(heap as *const Heap) }.host.get()
-    {
-        host.release(first, n);
+        let found = unsafe { &*(heap as *const Heap) };
+        // A new heap at the same address has another identity. Its slots
+        // belong to the lists that took them, not to this stale range.
+        if found.id == id
+            && let Some(Some(host)) = found.host.get()
+        {
+            host.release(first, n);
+        }
     }
 }
 
@@ -1493,6 +1507,8 @@ pub(crate) extern "system" fn create_heap(
     let heap = Box::new(Heap {
         object: Object::new(&FUNCTIONS),
         desc,
+        #[cfg(windows)]
+        id: NEXT_HEAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         start,
         memory,
         #[cfg(windows)]

@@ -71,6 +71,19 @@ pub(crate) extern "system" fn add_ref(this: This) -> u32 {
     unsafe { &*this }.refs.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// A new reference only while `this` is still alive (`refs > 0`). A release
+/// that has already reached zero is freeing the object; pinning it then
+/// would use memory that drop is about to free.
+pub(crate) fn add_ref_alive(this: This) -> bool {
+    if this.is_null() {
+        return false;
+    }
+    // SAFETY: `this` is one of our objects, or null (rejected above).
+    let refs = &unsafe { &*this }.refs;
+    refs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n > 0).then_some(n + 1))
+        .is_ok()
+}
+
 pub(crate) extern "system" fn release(this: This) -> u32 {
     // SAFETY: `this` is one of our objects.
     let refs = &unsafe { &*this }.refs;

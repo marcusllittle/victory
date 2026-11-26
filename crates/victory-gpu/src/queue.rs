@@ -244,6 +244,11 @@ fn submit_split(this: This, lists: &[This]) {
             .filter_map(|&l| crate::list::host_list(l))
             .collect();
         host.execute(&now);
+        // They have run: their descriptor tables' slots are free again, as
+        // in `submit_cut`. These lists are not detached, so nothing else
+        // gives the slots back before the title resets them, and a 1,000,000
+        // view heap's dynamic ring runs out.
+        crate::list::tables_done(&lists[..cut]);
     }
     if cut < lists.len() {
         static SEEN: AtomicU64 = AtomicU64::new(0);
