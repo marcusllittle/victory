@@ -109,8 +109,11 @@ fn clzero_stub(at: usize, stub: usize, cmp: [u8; 3]) -> Option<Vec<u8>> {
     Some(code)
 }
 
-/// Room for [`clzero_stub`]s near the title's code: where it is and the bytes used.
-static STUBS: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
+/// Room for [`clzero_stub`]s near the code that has the loops: each area, and the bytes used.
+/// Another area is made when a loop lies out of reach of every one (a jump goes 2 GB): the
+/// first area was made near the first loop, and code elsewhere (another module, or the test
+/// binary's own loops before a test's) was left unpatched.
+static STUBS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
 pub(crate) const STUBS_LEN: usize = 64 << 10;
 
 /// Memory for code within reach of a `jmp rel32` at `at`.
@@ -135,18 +138,29 @@ unsafe fn patch_clzero(at: usize, code: &[u8]) -> bool {
     let &[a, b, c, d, e, _, _, x, y, z, 0x72, 0xf4] = code else {
         return false;
     };
-    let mut stubs = STUBS.lock().unwrap_or_else(|e| e.into_inner());
-    if stubs.is_none() {
-        *stubs = near(at).map(|place| (place, 0));
-    }
-    let Some((place, used)) = stubs.as_mut() else {
+    if (at & 15) + 5 > 16 {
         return false;
+    }
+    let mut stubs = STUBS.lock().unwrap_or_else(|e| e.into_inner());
+    // A stub is at most 128 bytes: an area with that much left whose end is in reach.
+    const MOST: usize = 128;
+    let fits = |&(place, used): &(usize, usize)| used + MOST <= STUBS_LEN && jump(at, place + STUBS_LEN).is_some() && jump(at, place).is_some();
+    let index = match stubs.iter().position(fits) {
+        Some(i) => i,
+        None => {
+            let Some(place) = near(at) else {
+                return false;
+            };
+            stubs.push((place, 0));
+            stubs.len() - 1
+        }
     };
+    let (place, used) = &mut stubs[index];
     let stub = *place + *used;
     let (Some(body), Some(jump)) = (clzero_stub(at, stub, [x, y, z]), jump(at, stub)) else {
         return false;
     };
-    if *used + body.len() > STUBS_LEN || (at & 15) + 5 > 16 {
+    if *used + body.len() > STUBS_LEN {
         return false;
     }
     // SAFETY: inside the memory made for it, which nothing runs yet; then the title's code.
