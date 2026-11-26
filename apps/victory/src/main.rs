@@ -29,6 +29,8 @@ struct Cli {
     command: Command,
 }
 
+// Parsed once at the start: the size of the replay's options costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Summarise one PE image: headers, sections, imports, TLS, build id.
