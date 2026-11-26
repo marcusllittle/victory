@@ -1060,6 +1060,8 @@ void main() {
         piece0[5] ^= 1;
         piece0[9] ^= 2;
         assert_eq!(slot(PIECE - SKEW as usize), piece0);
+    }
+
     /// What the passes over copies in the card's memory cost on the card
     /// (ignored: a measurement): rounds of a few passes of some pieces and a
     /// wait, as a frame has them. `VICTORY_BENCH_CS=<file>` times another
@@ -4023,6 +4025,4 @@ void work() {
         }
         assert!(least.iter().all(|us| us.is_finite() && *us > 0.0), "the card gave no time for a batch");
     }
-}
-
 }
