@@ -36,7 +36,8 @@ Leave `VICTORY_NO_COMPILE` unset. That hash is for an AMD driver that never fini
 
 ## Checklist
 
-1. **Translate shaders once.** `target\release\victory.exe shaders <your shader archives>` opens the card and probes the view heap before it writes the cache, so the key matches a later run with these switches. This is the long step. It can be stopped and continued.
+0. **Check the PC.** `scripts\preflight.ps1` in the window you will play from, with the two paths set. It reads only: the build against the checked-out commit, the dump, the shader cache, the card and driver, Windows' GPU timeout, the commit limit and overlays that skew frame times. Fix its FAIL lines; read its WARN lines.
+1. **Translate shaders once.** `target\release\victory.exe shaders` (with no paths it reads `VICTORY_GAME_DIR`) opens the card and probes the view heap before it writes the cache, so the key matches a later run with these switches. This is the long step. It can be stopped and continued.
 2. **Play.** `.\Play-VIctory.cmd rtx3060` after `VICTORY_GAME_DIR` points at your dump. The same environment is `scripts\play.ps1 -Rtx3060 -Build release -Exe <your executable>`. `rtx3060-1080p` (or `-Output1080` with `-Rtx3060`) asks for a 1920x1080 output and a render scale of 1. That is not the default. Each patched place is compared to the bytes it was taken from and left unchanged when they differ. `VICTORY_FFX_SCALE` is not a switch here.
 3. **Warm pipelines after a run has drawn.** `target\release\victory.exe warm --used` makes the pipelines that run used, into the driver's on-disk cache, so the next launch spends less time compiling them. The first launch still stutters while that cache is empty. A panicked compile finishes its queue entry instead of holding the worker until the title's watchdog fires.
 4. **Do not record a frame in the world.** The title's own watchdog ends the process when a capture stalls a frame. `warm` and `shaders` do not record frames.
